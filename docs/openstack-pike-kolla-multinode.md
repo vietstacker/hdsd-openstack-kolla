@@ -253,8 +253,17 @@ Tới đây đã xong bước setup cơ bản, nếu sử dụng trên các môi
   ```
 
 
-#### Đứng trên các node `controller1`, `compute1` thực hiện các bước sau.
+#### 4.2.2. Đứng trên các node `controller1`, `compute1` và `compute2` thực hiện các bước sau.
 
+- Cài đặt các gói phụ trợ
+
+  ```sh  
+  yum install -y epel-release
+  yum update -y
+  
+  yum install -y git wget gcc python-devel python-pip yum-utils byobu
+  ````
+  
 - Copy ssh key được tạo ra từ node `deployserver`, key này sẽ dùng để node `deployserver` điều khiển các node target thông qua `ansible`
 
   ```sh
@@ -263,20 +272,17 @@ Tới đây đã xong bước setup cơ bản, nếu sử dụng trên các môi
 
   scp root@172.16.68.200:~/.ssh/id_rsa.pub ./
   ```
+  
   - Nhập mật khẩu của node `deployserver`
+    ```sh
+
+    cat id_rsa.pub >> ~/.ssh/authorized_keys
+
+    chmod 600 ~/.ssh/authorized_keys
+    ```
+
+- Cài đặt các gói phụ trợ và docker trên các node target, trong hướng dẫn này là trên `controller1`, `compute1` và `compute2`
   
-  ```sh
-
-  cat id_rsa.pub >> ~/.ssh/authorized_keys
-
-  chmod 600 ~/.ssh/authorized_keys
-  ```
-
-#### Cài đặt các gói phụ trợ và docker 
-
-  
-- Cài đặt docker trên `deployserver`
-
   ```sh
   yum-config-manager --add-repo https://download.docker.com/linux/centos/docker-ce.repo
 
@@ -292,7 +298,12 @@ Tới đây đã xong bước setup cơ bản, nếu sử dụng trên các môi
   MountFlags=shared
   EOF
   ```
-
+  
+- Khai báo registry cho các host cài docker. Bước này được khai báo để khi các node target tải images thì sẽ tải từ node `deployserver`.
+  ```sh
+  sed -i "s/\/usr\/bin\/dockerd/\/usr\/bin\/dockerd --insecure-registry 172.16.68.200:4000/g" /usr/lib/systemd/system/docker.service
+  ```
+ 
 - Khở động  và kích hoạt docker.
   ```sh
   systemctl daemon-reload
@@ -301,7 +312,7 @@ Tới đây đã xong bước setup cơ bản, nếu sử dụng trên các môi
   ```
   
   
-### Thực hiện deploy kolla
+### 5. Thực hiện deploy kolla
 
 - Đứng trên `deployserver` cấu hình cho docker
 
@@ -315,16 +326,114 @@ Tới đây đã xong bước setup cơ bản, nếu sử dụng trên các môi
   EOF
   ```
 
-- Khai báo registry cho các host cài docker.
+- Tải full images của docker để triển khai các container. Dung lượng khoảng 4GB
+
+  ```sh
+  byobu
+
+  cd /root
+
+  wget http://tarballs.openstack.org/kolla/images/centos-source-registry-pike.tar.gz
+
+  ````
+
+- Khai báo đường dẫn của registry local cho node `deployserver`. Lưu ý: Nếu IP của các bạn khác tôi thì cần khai báo lại.
   ```sh
   sed -i "s/\/usr\/bin\/dockerd/\/usr\/bin\/dockerd --insecure-registry 172.16.68.200:4000/g" /usr/lib/systemd/system/docker.service
   ```
 
-- Sửa file `multinode` cho phù hợp với mô hình 
+- Khởi động lại docker trên node `deployserver` sau khi khai báo đường dẫn của registry server. 
+  ```sh
+  systemctl daemon-reload
+  systemctl restart docker
+  ```
 
-```sh
-....
-```
+  
+- Tạo registry local để chứa các images này 
+
+  ```sh
+  mkdir /opt/registry
+
+  tar xf centos-source-registry-pike.tar.gz -C /opt/registry
+  ```
+  
+- Tới đây nên tắt máy đi và snapshot lại nếu triển khai trên các máy ảo - mục tiêu là để cài lại nếu có nhu cầu thì việc tải các images và đặt vào registry đã sẵn sàng.
+
+- Tạo container chạy registry. Đây chính là registry local được sử dụng cho toàn bộ các node target.
+
+  ```sh
+  docker run -d -p 4000:5000 --restart=always --name registry -v /opt/registry:/var/lib/registry registry
+  ```
+
+- Kiểm tra lại xem registry đã hoạt động hay chưa, IP sẽ hiển thị theo thực tế trong lab của bạn.
+
+  ```sh
+  curl http://172.16.68.200:4000/v2/lokolla/centos-source-memcached/tags/list
+  ```
+ 
+ - Kết quả là: 
+ 
+   ```sh
+   {"name":"lokolla/centos-source-memcached","tags":["5.0.1"]}
+   ```
+
+### Tải kolla-ansible
+
+- Tải kolla 
+
+  ```sh
+  cd /opt
+
+  git clone https://github.com/openstack/kolla-ansible.git -b stable/pike
+  
+  cd kolla-ansible
+  
+  pip install -r requirements.txt
+  
+  python setup.py install
+  
+  cp -r /usr/share/kolla-ansible/etc_examples/kolla /etc/kolla/
+  
+  cp /usr/share/kolla-ansible/ansible/inventory/* .
+  ```
+
+- Tạo file chứa mật khẩu bằng lệnh dưới, sau khi kết thúc lệnh thì file chứa mật khẩu sẽ nằm tại `/etc/kolla/passwords.yml`
+
+  ```sh
+  kolla-genpwd
+  ```
+  
+- Sửa file `/etc/kolla/globals.yml` để khai báo các thành phần cài trong kolla. Lưu ý: IP `172.16.68.202` có thể được thay theo thực tế của môi trường lab mà bạn sử dụng. Trong khai báo này tôi sẽ lựa chọn các project core của OpenStack để triển khai.
+
+  ```sh
+  sed -i 's/#kolla_base_distro: "centos"/kolla_base_distro: "centos"/g' /etc/kolla/globals.yml
+  sed -i 's/#kolla_install_type: "binary"/kolla_install_type: "source"/g' /etc/kolla/globals.yml
+  sed -i 's/#openstack_release: ""/openstack_release: "5.0.1"/g' /etc/kolla/globals.yml
+  sed -i 's/kolla_internal_vip_address: "10.10.10.254"/kolla_internal_vip_address: "172.16.68.199"/g' /etc/kolla/globals.yml
+  sed -i 's/#docker_registry: "172.16.0.10:4000"/docker_registry: "172.16.68.200:4000"/g' /etc/kolla/globals.yml
+  sed -i 's/#docker_namespace: "companyname"/docker_namespace: "lokolla"/g' /etc/kolla/globals.yml
+  sed -i 's/#network_interface: "eth0"/network_interface: "eth1"/g' /etc/kolla/globals.yml
+  sed -i 's/#neutron_external_interface: "eth1"/neutron_external_interface: "eth2"/g' /etc/kolla/globals.yml
+  sed -i 's/#keepalived_virtual_router_id: "51"/keepalived_virtual_router_id: "199"/g' /etc/kolla/globals.yml
+  sed -i 's/#enable_haproxy: "yes"/enable_haproxy: "yes"/g' /etc/kolla/globals.yml
+  sed -i 's/#nova_compute_virt_type: "kvm"/nova_compute_virt_type: "qemu"/g' /etc/kolla/globals.yml
+    ```
+ 
+- Sửa file `/opt/kolla-ansible/multinode` cho phù hợp với mô hình, các dòng cần sửa ở bên dưới. Khai báo này sẽ chỉ ra vai trò của từng node theo mô hình của hướng dẫn, thành phần network sẽ được cài cùng với controller. Lưu ý sửa lại các dòng thừa bằng cách comment, sau khi sửa xong có thể dùng lệnh dưới, lệnh sẽ hiển thị phần đầu như đoạn bên dưới.
+
+  ```sh
+  [root@deployserver kolla-ansible]# cat /opt/kolla-ansible/multinode | egrep -v '^#|^$'
+  [control]
+  172.16.68.201
+  [network]
+  172.16.68.201
+  [compute]
+  172.16.68.202
+  [monitoring]
+  172.16.68.201
+  [storage]
+  172.16.68.202
+  ```
 
 - Thực hiện lệnh dưới để cấu hình cho kolla, lệnh này sẽ truy cập sang các host target để kiểm tra và cài đặt.
   ```sh
@@ -366,9 +475,9 @@ Tới đây đã xong bước setup cơ bản, nếu sử dụng trên các môi
   
 - Có thể truy cập vào các node controller1` và `compute1` để kiểm tra các container đã được cài trên từng node bằng lệnh `docker ps -a`. Tham khảo: https://gist.github.com/congto/6a44cf22412ba9101e4b580e2e2c1718
 
-### Sử dụng OpenStack
+### 6. Sử dụng OpenStack
 
-
+#### 6.1. Tải các gói bổ trợ cho openstack client trên node `deployserver`
 - Cài đặt gói openstack-client để thực thi các lệnh của OpenStack
 
   ```sh
@@ -392,7 +501,7 @@ Tới đây đã xong bước setup cơ bản, nếu sử dụng trên các môi
 - Các lệnh khác: `openstack project list`, `openstack user list`
 
 
-### Tạo các khai báo ban đầu sau khi cài OpenStack xong\
+### Tạo các khai báo ban đầu sau khi cài OpenStack xong
 
 - Các khai báo ban đề về network, subnet, router, flavor, tải images security .... được khai báo trong script do kolla cung cấp.
 
@@ -454,7 +563,7 @@ openstack server create \
 
 ```
 
-### Truy cập vào dashboad
+#### 6.2. Truy cập vào dashboad
 
 - Sử dụng IP VIP do đã khai báo ở bước sửa file `global.yml` bên trên, trong hướng dẫn này là 172.16.68.199. Mật khẩu trong file `/etc/kolla/admin-openrc.sh`
 
