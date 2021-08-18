@@ -420,5 +420,3 @@ openstack server create \
   14e76371e77b        172.16.68.202:4000/lokolla/centos-source-fluentd:5.0.1                     "kolla_start"            5 hours ago                                                                                                           Up 5 hours                                   fluentd
   0577297ef94c        registry                                                                   "/entrypoint.sh /e..."   5 hours ago                                                                                                           Up 5 hours          0.0.0.0:4000->5000/tcp   registry
   ```
-
-
